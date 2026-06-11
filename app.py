@@ -269,15 +269,27 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def show_section(label: str, rows: list[dict], key_prefix: str):
+def extract_date_prefix(df: pd.DataFrame) -> str:
+    """Return MMDD string from the first non-empty 日期 value in the dataframe."""
+    try:
+        raw = df["日期"].dropna().iloc[0]
+        dt = pd.to_datetime(raw)
+        return dt.strftime("%m%d")
+    except Exception:
+        return ""
+
+
+def show_section(label: str, rows: list[dict], key_prefix: str, date_prefix: str):
     pick = make_pick_list(rows)
+    pick_name = f"{date_prefix}{label}水单拣货单.csv"
+    ship_name = f"{date_prefix}{label}水单发货单.pdf"
 
     st.subheader(f"{label} — 拣货单")
     st.dataframe(pick, use_container_width=True, hide_index=True)
     st.download_button(
         f"⬇ 下载{label}拣货单 CSV",
         to_csv_bytes(pick),
-        f"{label}拣货单.csv",
+        pick_name,
         "text/csv",
         key=f"{key_prefix}_pick",
     )
@@ -288,7 +300,7 @@ def show_section(label: str, rows: list[dict], key_prefix: str):
     st.download_button(
         f"⬇ 下载{label}发货单 PDF",
         pdf_bytes,
-        f"{label}发货单.pdf",
+        ship_name,
         "application/pdf",
         key=f"{key_prefix}_ship",
     )
@@ -320,15 +332,17 @@ st.divider()
 if customer_file:
     df_c = read_file(customer_file)
     rows_c = parse_customer_rows(df_c)
+    date_c = extract_date_prefix(df_c)
     st.markdown("## 客人水单")
-    show_section("客人", rows_c, "c")
+    show_section("客人", rows_c, "c", date_c)
     st.divider()
 
 if influencer_file:
     df_i = read_file(influencer_file)
     rows_i = parse_influencer_rows(df_i)
+    date_i = extract_date_prefix(df_i)
     st.markdown("## 深度达人单")
-    show_section("达人", rows_i, "i")
+    show_section("达人", rows_i, "i", date_i)
 
 if not customer_file and not influencer_file:
     st.info("请上传客人水单或深度达人单 CSV 文件以生成报表。")
