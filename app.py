@@ -1,4 +1,5 @@
 import io
+import os
 import re
 from collections import OrderedDict
 
@@ -9,13 +10,37 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (PageBreak, Paragraph, SimpleDocTemplate,
                                 Spacer, Table, TableStyle)
 from reportlab.lib.styles import ParagraphStyle
 
-# Register CJK font (bundled with reportlab, no external file needed)
-pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-CJK = "STSong-Light"
+
+def _register_cjk_font() -> str:
+    """Try to register a TTF font that covers all CJK (incl. traditional).
+    Falls back to the built-in CID font if none found."""
+    candidates = [
+        # Linux / Streamlit Cloud (install via packages.txt: fonts-noto-cjk)
+        "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        # macOS
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Songti.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                pdfmetrics.registerFont(TTFont("CJKFont", path))
+                return "CJKFont"
+            except Exception:
+                continue
+    # Built-in CID fallback (covers GB2312 simplified CJK)
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    return "STSong-Light"
+
+CJK = _register_cjk_font()
 
 st.set_page_config(page_title="拣货单 & 发货单生成器", layout="wide")
 st.title("拣货单 & 发货单生成器")
@@ -52,7 +77,6 @@ def parse_customer_rows(df: pd.DataFrame) -> list[dict]:
     prev_tracking = prev_name = prev_address = prev_note = ""
 
     for _, r in df.iterrows():
-        product_raw  = str(r.get("Product Name", "")).strip()
         size         = str(r.get("Size'", "")).strip()
         loc_raw      = str(r.get("库位", "")).strip()
         tracking_raw = str(r.get("打包 Tracking No.", "")).strip()
@@ -76,12 +100,16 @@ def parse_customer_rows(df: pd.DataFrame) -> list[dict]:
         if is_blank(note):
             note = ""
 
-        products  = [p.strip() for p in product_raw.split(",")
-                     if p.strip() and not is_blank(p)]
-        loc_parts = [l.strip() for l in loc_raw.split(",") if l.strip()]
-
-        for i, product in enumerate(products):
-            loc = extract_location(loc_parts[i]) if i < len(loc_parts) else ""
+        # Parse product name + location directly from 库位 column
+        # Each entry format: "Product Name ｜ 库位：A-01-01"
+        for part in loc_raw.split(","):
+            part = part.strip()
+            m = re.match(r"(.+?)\s*｜\s*库位：(\S+)", part)
+            if m:
+                product = m.group(1).strip()
+                loc     = m.group(2).strip()
+            else:
+                continue  # skip malformed entries
             rows.append(dict(tracking=tracking, name=name, address=address,
                              product=product, location=loc, size=size, note=note))
     return rows
@@ -136,17 +164,33 @@ def make_pick_list(rows: list[dict]) -> pd.DataFrame:
 def make_shipping_pdf(rows: list[dict]) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter,
-                            leftMargin=0.75*inch, rightMargin=0.75*inch,
-                            topMargin=0.75*inch, bottomMargin=0.75*inch)
+                            leftMargin=0.6*inch, rightMargin=0.6*inch,
+                            topMargin=0.6*inch, bottomMargin=0.6*inch)
 
-    h1    = ParagraphStyle("h1",    fontName=CJK, fontSize=13, spaceAfter=4, leading=18)
-    body  = ParagraphStyle("body",  fontName=CJK, fontSize=10, spaceAfter=3, leading=14)
-    label = ParagraphStyle("label", fontName=CJK, fontSize=10, spaceAfter=3,
-                           leading=14, textColor=colors.HexColor("#555555"))
-    note  = ParagraphStyle("note",  fontName=CJK, fontSize=10, spaceAfter=3,
-                           leading=14, textColor=colors.red)
+    YELLOW     = colors.HexColor("#FFE600")
+    PINK       = colors.HexColor("#FFD6E0")
+    HEADER_BG  = colors.HexColor("#4A90D9")
 
-    # Group rows preserving insertion order (= upload order)
+    tracking_style = ParagraphStyle(
+        "tracking", fontName=CJK, fontSize=22, leading=28,
+        spaceAfter=10, backColor=YELLOW,
+        leftIndent=6, rightIndent=6,
+    )
+    name_style = ParagraphStyle(
+        "name", fontName=CJK, fontSize=16, leading=22,
+        spaceAfter=4, backColor=PINK,
+        leftIndent=6, rightIndent=6,
+    )
+    addr_style = ParagraphStyle(
+        "addr", fontName=CJK, fontSize=14, leading=20,
+        spaceAfter=3, leftIndent=6,
+    )
+    note_style = ParagraphStyle(
+        "note", fontName=CJK, fontSize=14, leading=20,
+        spaceAfter=3, textColor=colors.red, leftIndent=6,
+    )
+
+    # Group rows preserving insertion order
     groups: dict[str, list[dict]] = OrderedDict()
     for row in rows:
         groups.setdefault(row["tracking"], []).append(row)
@@ -159,18 +203,19 @@ def make_shipping_pdf(rows: list[dict]) -> bytes:
             story.append(PageBreak())
         first_page = False
 
-        # ── Header ──
-        story.append(Paragraph(f"Tracking No.: {tracking}", h1))
-        story.append(Spacer(1, 0.08*inch))
+        # ── Tracking number (yellow highlight) ──
+        story.append(Paragraph(f"Tracking No.: {tracking}", tracking_style))
+        story.append(Spacer(1, 0.12*inch))
 
+        # ── Recipient name (pink highlight) + address ──
         name    = items[0]["name"]
         address = items[0]["address"]
 
-        story.append(Paragraph(f"收件人：{name}", body))
+        story.append(Paragraph(name, name_style))
         for line in address.split("\n"):
             if line.strip():
-                story.append(Paragraph(line.strip(), body))
-        story.append(Spacer(1, 0.15*inch))
+                story.append(Paragraph(line.strip(), addr_style))
+        story.append(Spacer(1, 0.2*inch))
 
         # ── Product table (aggregate qty) ──
         merged: dict[tuple, int] = {}
@@ -182,21 +227,24 @@ def make_shipping_pdf(rows: list[dict]) -> bytes:
         for (product, loc, sz), qty in merged.items():
             table_data.append([product, loc, sz, str(qty)])
 
-        col_widths = [3.0*inch, 1.2*inch, 0.7*inch, 0.7*inch]
-        tbl = Table(table_data, colWidths=col_widths)
+        usable = 7.3 * inch  # letter width minus margins
+        col_widths = [usable * 0.50, usable * 0.25, usable * 0.13, usable * 0.12]
+        tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
         tbl.setStyle(TableStyle([
             ("FONTNAME",       (0, 0), (-1, -1), CJK),
-            ("FONTSIZE",       (0, 0), (-1, -1), 10),
-            ("BACKGROUND",     (0, 0), (-1,  0), colors.HexColor("#4A90D9")),
+            ("FONTSIZE",       (0, 0), (-1,  0), 16),   # header row
+            ("FONTSIZE",       (0, 1), (-1, -1), 15),   # data rows
+            ("BACKGROUND",     (0, 0), (-1,  0), HEADER_BG),
             ("TEXTCOLOR",      (0, 0), (-1,  0), colors.white),
             ("ALIGN",          (0, 0), (-1, -1), "CENTER"),
             ("ALIGN",          (0, 1), (0,  -1), "LEFT"),
-            ("GRID",           (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+            ("GRID",           (0, 0), (-1, -1), 0.8, colors.HexColor("#AAAAAA")),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1),
              [colors.white, colors.HexColor("#F0F4F8")]),
-            ("TOPPADDING",     (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING",  (0, 0), (-1, -1), 6),
-            ("LEFTPADDING",    (0, 0), (-1, -1), 6),
+            ("TOPPADDING",     (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING",  (0, 0), (-1, -1), 10),
+            ("LEFTPADDING",    (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING",   (0, 0), (-1, -1), 8),
         ]))
         story.append(tbl)
 
@@ -205,9 +253,9 @@ def make_shipping_pdf(rows: list[dict]) -> bytes:
             item["note"] for item in items if item["note"]
         ))
         if all_notes:
-            story.append(Spacer(1, 0.12*inch))
+            story.append(Spacer(1, 0.15*inch))
             for n in all_notes:
-                story.append(Paragraph(f"备注：{n}", note))
+                story.append(Paragraph(f"备注：{n}", note_style))
 
     doc.build(story)
     return buf.getvalue()
@@ -248,28 +296,39 @@ def show_section(label: str, rows: list[dict], key_prefix: str):
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 
+def read_file(f) -> pd.DataFrame:
+    name = f.name.lower()
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        return pd.read_excel(f)
+    return pd.read_csv(f)
+
+
 col_c, col_i = st.columns(2)
 
 with col_c:
-    customer_file = st.file_uploader("上传客人水单 CSV", type=["csv"], key="customer_upload")
+    customer_file = st.file_uploader(
+        "上传客人水单 CSV / Excel", type=["csv", "xlsx", "xls"], key="customer_upload"
+    )
 
 with col_i:
-    influencer_file = st.file_uploader("上传深度达人单 CSV", type=["csv"], key="influencer_upload")
+    influencer_file = st.file_uploader(
+        "上传深度达人单 CSV / Excel", type=["csv", "xlsx", "xls"], key="influencer_upload"
+    )
 
 st.divider()
 
 if customer_file:
-    df_c = pd.read_csv(customer_file)
+    df_c = read_file(customer_file)
     rows_c = parse_customer_rows(df_c)
     st.markdown("## 客人水单")
     show_section("客人", rows_c, "c")
     st.divider()
 
 if influencer_file:
-    df_i = pd.read_csv(influencer_file)
+    df_i = read_file(influencer_file)
     rows_i = parse_influencer_rows(df_i)
     st.markdown("## 深度达人单")
     show_section("达人", rows_i, "i")
 
 if not customer_file and not influencer_file:
-    st.info("请上传客人水单或深度达人单 CSV 文件以生成报表。")
+    st.info("请上传客人水单或深度达人单 CSV / Excel 文件以生成报表。")
