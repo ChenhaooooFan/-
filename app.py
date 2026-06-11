@@ -307,12 +307,12 @@ col_c, col_i = st.columns(2)
 
 with col_c:
     customer_file = st.file_uploader(
-        "上传客人水单 CSV / Excel", type=["csv", "xlsx", "xls"], key="customer_upload"
+        "上传客人水单 CSV", type=["csv"], key="customer_upload"
     )
 
 with col_i:
     influencer_file = st.file_uploader(
-        "上传深度达人单 CSV / Excel", type=["csv", "xlsx", "xls"], key="influencer_upload"
+        "上传深度达人单 CSV", type=["csv"], key="influencer_upload"
     )
 
 st.divider()
@@ -331,4 +331,4 @@ if influencer_file:
     show_section("达人", rows_i, "i")
 
 if not customer_file and not influencer_file:
-    st.info("请上传客人水单或深度达人单 CSV / Excel 文件以生成报表。")
+    st.info("请上传客人水单或深度达人单 CSV 文件以生成报表。")
